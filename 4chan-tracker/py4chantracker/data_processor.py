@@ -95,6 +95,9 @@ class DataProcessor:
         self.boards = boards
         self.threads: Dict[str, Dict[int, ThreadData]] = defaultdict(dict)
         self.history: Dict[str, Dict[int, List[Dict]]] = defaultdict(lambda: defaultdict(list))
+        # Tracks threads currently present in the latest catalog fetch per board
+        # while preserving catalog order for stable exports.
+        self.active_thread_ids: Dict[str, List[int]] = defaultdict(list)
         self._load_state()
 
     def _load_state(self):
@@ -191,6 +194,8 @@ class DataProcessor:
         metadata = []
         changed_threads = []
         new_threads = []
+        current_catalog_thread_ids: List[int] = []
+        seen_thread_ids: Set[int] = set()
 
         # Process in order with correct page numbers and board_index
         global_index = 0
@@ -198,6 +203,10 @@ class DataProcessor:
         for page_num, page in enumerate(catalog_data, 1):  # Page numbers start at 1
             for thread_data in page.get('threads', []):
                 thread_id = thread_data.get('no')
+                if thread_id in seen_thread_ids:
+                    continue
+                seen_thread_ids.add(thread_id)
+                current_catalog_thread_ids.append(thread_id)
 
                 # Create or get thread
                 if thread_id in self.threads[board]:
@@ -234,8 +243,6 @@ class DataProcessor:
                 # Track board index changes
                 if thread.board_index != old_board_index:
                     thread.board_index_history.append(thread.board_index)
-                    if len(thread.board_index_history) > 100:
-                        thread.board_index_history = thread.board_index_history[-100:]
 
                 # Check for changes
                 if not is_new and (thread.replies != old_replies or
@@ -256,6 +263,10 @@ class DataProcessor:
                     thread.board_index_history = [thread.board_index]
 
                 global_index += 1
+
+        # Metadata should reflect only threads currently visible in the latest
+        # catalog check for this board. History remains in self.threads/history.
+        self.active_thread_ids[board] = current_catalog_thread_ids
 
         return metadata, changed_threads, new_threads
 
@@ -282,8 +293,6 @@ class DataProcessor:
                     if thread.board_index != global_index:
                         thread.board_index = global_index
                         thread.board_index_history.append(global_index)
-                        if len(thread.board_index_history) > 100:
-                            thread.board_index_history = thread.board_index_history[-100:]
 
                     if thread.replies != old_replies:
                         changed_threads.append(thread)
@@ -297,14 +306,16 @@ class DataProcessor:
 
     def add_history(self, board: str, thread_id: int, snapshot: Dict):
         """Add a snapshot to thread history."""
-        if len(self.history[board][thread_id]) >= 100:
-            self.history[board][thread_id] = self.history[board][thread_id][-99:]
-
         self.history[board][thread_id].append(snapshot)
 
     def get_metadata(self, board: str) -> List[Dict]:
         """Get current metadata for a board."""
-        return [thread.to_metadata_dict() for thread in self.threads[board].values()]
+        active_ids = self.active_thread_ids.get(board, [])
+        return [
+            self.threads[board][thread_id].to_metadata_dict()
+            for thread_id in active_ids
+            if thread_id in self.threads[board]
+        ]
 
     def get_history(self, board: str) -> List[Dict]:
         """Get history data for a board."""

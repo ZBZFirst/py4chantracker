@@ -1,3 +1,3 @@
-pip install https://github.com/ZBZFirst/py4chantracker/releases/download/v1.0.0/py4chantracker-1.1.1.tar.gz
+pip install git+https://github.com/ZBZFirst/py4chantracker.git#subdirectory=4chan-tracker
 
 this should work. you will get an excel spreadsheet at the end of one iteration. it creates a backup for each iteration ran.

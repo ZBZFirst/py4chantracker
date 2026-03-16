@@ -2,7 +2,7 @@
 py4chantracker - Track and analyze 4chan threads across multiple boards
 """
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __author__ = "Your Name"
 
 from .api_client import FourChanAPIClient

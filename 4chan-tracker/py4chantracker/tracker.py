@@ -2,7 +2,7 @@
 
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import threading
 import signal
@@ -31,8 +31,9 @@ class FourChanTracker:
         # Tracking
         self.last_growth_check = defaultdict(int)
         self.last_status_check = defaultdict(int)
-        self.last_excel_save = 0
-        self.last_state_save = 0
+        now = time.time()
+        self.last_excel_save = now
+        self.last_state_save = now
         self.running = False
 
     def check_growth(self, board: str) -> List[Dict]:
@@ -80,18 +81,18 @@ class FourChanTracker:
         self.last_growth_check[board] = now
         return delta_rows
 
-    def check_status(self, board: str) -> List[Dict]:
+    def check_status(self, board: str) -> Tuple[List[Dict], bool]:
         """Check thread status using catalog.json."""
         now = int(time.time())
 
         if (now - self.last_status_check.get(board, 0)) < (self.status_interval * 60):
-            return []
+            return [], False
 
         print(f"  📋 Checking /{board}/ status...")
 
         catalog_data = self.api.get_catalog(board)
         if not catalog_data:
-            return []
+            return [], False
 
         metadata, changed_threads, new_threads = self.processor.process_catalog(board, catalog_data)
         delta_rows = []
@@ -125,7 +126,7 @@ class FourChanTracker:
             print(f"  ✅ /{board}/: {len(metadata)} current, {len(self.processor.threads[board])} tracked, {total_changes} changes")
 
         self.last_status_check[board] = now
-        return delta_rows
+        return delta_rows, True
 
     def run_iteration(self):
         """Run one iteration of checks."""
@@ -134,16 +135,24 @@ class FourChanTracker:
 
         any_changes = False
         delta_rows_by_board = defaultdict(list)
+        status_checked_boards = set()
 
         # Check status for all boards
         for board in self.boards:
-            status_rows = self.check_status(board)
+            status_rows, status_checked = self.check_status(board)
+            if status_checked:
+                status_checked_boards.add(board)
             if status_rows:
                 any_changes = True
                 delta_rows_by_board[board].extend(status_rows)
 
         # Check growth for all boards
         for board in self.boards:
+            # Skip growth right after a successful catalog check for this board.
+            # Catalog processing already updates replies/page/index and captures
+            # a snapshot for changed/new threads.
+            if board in status_checked_boards:
+                continue
             growth_rows = self.check_growth(board)
             if growth_rows:
                 any_changes = True

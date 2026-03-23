@@ -2,7 +2,7 @@
 
 import time
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Tuple
 from collections import defaultdict
 import threading
 import signal
@@ -26,27 +26,31 @@ class FourChanTracker:
         self.growth_interval = 1    # minutes (threads.json)
         self.status_interval = 5    # minutes (catalog.json)
         self.excel_save_interval = 15  # minutes
+        self.state_save_interval = 5  # minutes
 
         # Tracking
         self.last_growth_check = defaultdict(int)
         self.last_status_check = defaultdict(int)
-        self.last_excel_save = 0
+        now = time.time()
+        self.last_excel_save = now
+        self.last_state_save = now
         self.running = False
 
-    def check_growth(self, board: str) -> bool:
+    def check_growth(self, board: str) -> List[Dict]:
         """Check for thread growth using threads.json."""
         now = int(time.time())
 
         if (now - self.last_growth_check.get(board, 0)) < (self.growth_interval * 60):
-            return False
+            return []
 
         print(f"  📈 Checking /{board}/ growth...")
 
         threads_data = self.api.get_threads(board)
         if not threads_data:
-            return False
+            return []
 
         changed_threads = self.processor.process_threads(board, threads_data)
+        delta_rows = []
 
         # Add to history
         current_time = now
@@ -60,27 +64,38 @@ class FourChanTracker:
                 'archived': thread.archived
             }
             self.processor.add_history(board, thread.thread_id, snapshot)
+            delta_rows.append({
+                'timestamp': current_time,
+                'board': board,
+                'thread_id': thread.thread_id,
+                'replies': thread.replies,
+                'page': thread.page,
+                'last_modified': thread.last_modified,
+                'closed': thread.closed,
+                'archived': thread.archived
+            })
 
         if changed_threads:
             print(f"  ✅ /{board}/: {len(changed_threads)} threads updated")
 
         self.last_growth_check[board] = now
-        return bool(changed_threads)
+        return delta_rows
 
-    def check_status(self, board: str) -> bool:
+    def check_status(self, board: str) -> Tuple[List[Dict], bool]:
         """Check thread status using catalog.json."""
         now = int(time.time())
 
         if (now - self.last_status_check.get(board, 0)) < (self.status_interval * 60):
-            return False
+            return [], False
 
         print(f"  📋 Checking /{board}/ status...")
 
         catalog_data = self.api.get_catalog(board)
         if not catalog_data:
-            return False
+            return [], False
 
         metadata, changed_threads, new_threads = self.processor.process_catalog(board, catalog_data)
+        delta_rows = []
 
         # Add to history
         current_time = now
@@ -95,13 +110,23 @@ class FourChanTracker:
                 'archived': thread.archived
             }
             self.processor.add_history(board, thread.thread_id, snapshot)
+            delta_rows.append({
+                'timestamp': current_time,
+                'board': board,
+                'thread_id': thread.thread_id,
+                'replies': thread.replies,
+                'page': thread.page,
+                'last_modified': thread.last_modified,
+                'closed': thread.closed,
+                'archived': thread.archived
+            })
 
         total_changes = len(all_threads)
         if total_changes or metadata:
             print(f"  ✅ /{board}/: {len(metadata)} current, {len(self.processor.threads[board])} tracked, {total_changes} changes")
 
         self.last_status_check[board] = now
-        return total_changes > 0
+        return delta_rows, True
 
     def run_iteration(self):
         """Run one iteration of checks."""
@@ -109,22 +134,41 @@ class FourChanTracker:
         print("-" * 40)
 
         any_changes = False
+        delta_rows_by_board = defaultdict(list)
+        status_checked_boards = set()
 
         # Check status for all boards
         for board in self.boards:
-            if self.check_status(board):
+            status_rows, status_checked = self.check_status(board)
+            if status_checked:
+                status_checked_boards.add(board)
+            if status_rows:
                 any_changes = True
+                delta_rows_by_board[board].extend(status_rows)
 
         # Check growth for all boards
         for board in self.boards:
-            if self.check_growth(board):
+            # Skip growth right after a successful catalog check for this board.
+            # Catalog processing already updates replies/page/index and captures
+            # a snapshot for changed/new threads.
+            if board in status_checked_boards:
+                continue
+            growth_rows = self.check_growth(board)
+            if growth_rows:
                 any_changes = True
+                delta_rows_by_board[board].extend(growth_rows)
 
-        # Save state
-        self.processor.save_state()
-
-        # Check if we should save to Excel
         now = time.time()
+
+        if any_changes:
+            self.excel.append_history_rows(delta_rows_by_board)
+
+        # Save state less frequently to reduce disk churn on low-resource devices
+        if (now - self.last_state_save) >= (self.state_save_interval * 60):
+            self.processor.save_state()
+            self.last_state_save = now
+
+        # Check if we should save a full Excel snapshot
         if any_changes and (now - self.last_excel_save) >= (self.excel_save_interval * 60):
             print(f"\n💾 Saving to Excel...")
 
@@ -148,7 +192,7 @@ class FourChanTracker:
 
         return any_changes
 
-    def run_continuous(self, stop_event=None):
+    def run_continuous(self, stop_event=None, max_runtime_hours: float = 0):
         """Run continuous tracking."""
         print("\n" + "="*60)
         print("⚡ 4CHAN TRACKER - MODULAR VERSION")
@@ -156,19 +200,32 @@ class FourChanTracker:
         print(f"Boards: {', '.join(self.boards)}")
         print(f"Growth check: {self.growth_interval} min")
         print(f"Status check: {self.status_interval} min")
+        print(f"State save: {self.state_save_interval} min")
         print(f"Excel save: {self.excel_save_interval} min")
+        if max_runtime_hours and max_runtime_hours > 0:
+            print(f"Run duration: {max_runtime_hours:g} hour(s)")
+        else:
+            print("Run duration: Until stopped")
         print("Press Ctrl+C to stop\n")
 
         self.running = True
+        start_time = time.time()
+        max_runtime_seconds = max_runtime_hours * 3600 if max_runtime_hours > 0 else 0
 
         try:
             while not (stop_event and stop_event.is_set()):
+                if max_runtime_seconds and (time.time() - start_time) >= max_runtime_seconds:
+                    print("\n⏱️ Max runtime reached. Stopping tracker...")
+                    break
+
                 self.run_iteration()
 
                 # Wait for next iteration
                 print(f"\n⏳ Next check in {self.growth_interval} minute(s)...")
                 for _ in range(self.growth_interval * 60):
                     if stop_event and stop_event.is_set():
+                        break
+                    if max_runtime_seconds and (time.time() - start_time) >= max_runtime_seconds:
                         break
                     time.sleep(1)
 
@@ -235,11 +292,19 @@ def main():
             if status:
                 tracker.status_interval = int(status)
 
+            state_int = input(f"State save interval (minutes, default {tracker.state_save_interval}): ").strip()
+            if state_int:
+                tracker.state_save_interval = int(state_int)
+
             excel_int = input(f"Excel save interval (minutes, default {tracker.excel_save_interval}): ").strip()
             if excel_int:
                 tracker.excel_save_interval = int(excel_int)
+
+            runtime = input("Run duration in hours (blank = until stopped): ").strip()
+            max_runtime_hours = float(runtime) if runtime else 0
         except ValueError:
             print("Using default intervals")
+            max_runtime_hours = 0
 
         # Set up signal handling
         stop_event = threading.Event()
@@ -251,7 +316,7 @@ def main():
         signal.signal(signal.SIGINT, signal_handler)
 
         # Run tracking
-        tracker.run_continuous(stop_event)
+        tracker.run_continuous(stop_event, max_runtime_hours=max_runtime_hours)
 
     else:
         print("❌ Invalid choice")

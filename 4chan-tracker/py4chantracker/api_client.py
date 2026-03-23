@@ -13,10 +13,12 @@ class FourChanAPIClient:
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': '4chan Tracker/1.0',
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'Accept-Encoding': 'gzip, deflate'
         })
         self.last_request_time = 0
         self.rate_limit = rate_limit_seconds
+        self._cache_headers: Dict[str, Dict[str, str]] = {}
 
     def _rate_limit(self):
         """Enforce rate limiting."""
@@ -29,9 +31,22 @@ class FourChanAPIClient:
         """Get catalog.json for a board."""
         self._rate_limit()
         url = f"{self.BASE_URL}/{board}/catalog.json"
+        request_headers = {}
+        cached = self._cache_headers.get(url, {})
+        if cached.get('etag'):
+            request_headers['If-None-Match'] = cached['etag']
+        if cached.get('last_modified'):
+            request_headers['If-Modified-Since'] = cached['last_modified']
         try:
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(url, headers=request_headers, timeout=8)
+            if response.status_code == 304:
+                self.last_request_time = time.time()
+                return []
             response.raise_for_status()
+            self._cache_headers[url] = {
+                'etag': response.headers.get('ETag', ''),
+                'last_modified': response.headers.get('Last-Modified', '')
+            }
             self.last_request_time = time.time()
             return response.json()
         except Exception as e:
@@ -42,9 +57,22 @@ class FourChanAPIClient:
         """Get threads.json for a board."""
         self._rate_limit()
         url = f"{self.BASE_URL}/{board}/threads.json"
+        request_headers = {}
+        cached = self._cache_headers.get(url, {})
+        if cached.get('etag'):
+            request_headers['If-None-Match'] = cached['etag']
+        if cached.get('last_modified'):
+            request_headers['If-Modified-Since'] = cached['last_modified']
         try:
-            response = self.session.get(url, timeout=10)
+            response = self.session.get(url, headers=request_headers, timeout=8)
+            if response.status_code == 304:
+                self.last_request_time = time.time()
+                return []
             response.raise_for_status()
+            self._cache_headers[url] = {
+                'etag': response.headers.get('ETag', ''),
+                'last_modified': response.headers.get('Last-Modified', '')
+            }
             self.last_request_time = time.time()
             return response.json()
         except Exception as e:

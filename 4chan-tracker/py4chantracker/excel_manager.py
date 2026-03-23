@@ -5,6 +5,7 @@ Excel Manager for saving 4chan data
 import pandas as pd
 import os
 import shutil
+import csv
 from datetime import datetime
 from typing import Dict, List
 import warnings
@@ -17,7 +18,43 @@ class ExcelManager:
     def __init__(self, filename: str = "4chan_history.xlsx"):
         self.filename = filename
         self.backup_dir = "excel_backups"
+        self.delta_dir = "history_deltas"
         os.makedirs(self.backup_dir, exist_ok=True)
+        os.makedirs(self.delta_dir, exist_ok=True)
+
+    def append_history_rows(self, rows_by_board: Dict[str, List[Dict]]):
+        """
+        Fast append-only persistence for history deltas.
+        This avoids opening/re-writing the full Excel file each iteration.
+        """
+        for board, rows in rows_by_board.items():
+            if not rows:
+                continue
+
+            csv_path = os.path.join(self.delta_dir, f"{board}_history_deltas.csv")
+            file_exists = os.path.exists(csv_path)
+
+            try:
+                with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(
+                        f,
+                        fieldnames=[
+                            "timestamp",
+                            "board",
+                            "thread_id",
+                            "replies",
+                            "page",
+                            "last_modified",
+                            "closed",
+                            "archived"
+                        ]
+                    )
+                    if not file_exists:
+                        writer.writeheader()
+                    writer.writerows(rows)
+                print(f"    🧾 {board}_history_deltas.csv: +{len(rows)} rows")
+            except Exception as e:
+                print(f"    ⚠️ Failed delta append for /{board}/: {e}")
 
     def create_backup(self):
         """Create backup of current Excel file."""
